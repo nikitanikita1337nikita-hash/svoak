@@ -420,9 +420,14 @@ type Room = {
   clockOffset?: number;
 };
 
-const socket = io(`http://${window.location.hostname}:3001`, {
-  autoConnect: false
-});
+const socket = io(
+  import.meta.env.PROD
+    ? window.location.origin
+    : `http://${window.location.hostname}:3001`,
+  {
+    autoConnect: false
+  }
+);
 
 export default function App() {
   const [connected, setConnected] = useState(false);
