@@ -4,7 +4,72 @@ const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
 
-const httpServer = createServer();
+// Раздача сайта из папки dist
+const DIST_DIR = path.join(__dirname, 'dist');
+
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.webp': 'image/webp'
+};
+
+const httpServer = createServer((req, res) => {
+  // Запросы Socket.IO обрабатывает сам Socket.IO
+  if (req.url?.startsWith('/socket.io/')) return;
+
+  let pathname;
+
+  try {
+    pathname = decodeURIComponent(
+      new URL(req.url, 'http://localhost').pathname
+    );
+  } catch {
+    res.writeHead(400);
+    res.end('Bad Request');
+    return;
+  }
+
+  const requestedFile = path.resolve(DIST_DIR, '.' + pathname);
+
+  if (
+    requestedFile !== DIST_DIR &&
+    !requestedFile.startsWith(DIST_DIR + path.sep)
+  ) {
+    res.writeHead(403);
+    res.end('Forbidden');
+    return;
+  }
+
+  fs.stat(requestedFile, (error, stats) => {
+    const filePath = !error && stats.isFile()
+      ? requestedFile
+      : path.join(DIST_DIR, 'index.html');
+
+    fs.readFile(filePath, (readError, content) => {
+      if (readError) {
+        res.writeHead(500);
+        res.end('Файлы сайта не найдены. Проверьте сборку.');
+        return;
+      }
+
+      res.writeHead(200, {
+        'Content-Type':
+          MIME_TYPES[path.extname(filePath)] || 'application/octet-stream'
+      });
+
+      res.end(content);
+    });
+  });
+});
 
 const io = new Server(httpServer, {
   cors: {
