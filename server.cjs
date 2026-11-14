@@ -4,7 +4,100 @@ const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
 
-const httpServer = createServer();
+const PORT = process.env.PORT || 3001;
+const MAX_PLAYERS = 7;
+
+const DIST_DIR = path.join(__dirname, 'dist');
+const HISTORY_FILE = path.join(__dirname, 'question-history.json');
+
+// MIME-типы файлов
+const MIME_TYPES = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript',
+  '.css': 'text/css',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.webp': 'image/webp'
+};
+
+// HTTP-сервер раздаёт frontend из dist
+const httpServer = createServer((req, res) => {
+  let pathname;
+
+  try {
+    pathname = decodeURIComponent(
+      new URL(req.url, 'http://localhost').pathname
+    );
+  } catch {
+    res.writeHead(400);
+    return res.end('Bad Request');
+  }
+
+  // Socket.IO обрабатывает собственные запросы
+  if (pathname.startsWith('/socket.io/')) {
+    return;
+  }
+
+  const requestedPath = path.resolve(
+    DIST_DIR,
+    '.' + pathname
+  );
+
+  // Защита от выхода за пределы dist
+  if (
+    requestedPath !== DIST_DIR &&
+    !requestedPath.startsWith(DIST_DIR + path.sep)
+  ) {
+    res.writeHead(403);
+    return res.end('Forbidden');
+  }
+
+  fs.stat(requestedPath, (error, stats) => {
+    let filePath;
+
+    if (!error && stats.isFile()) {
+      filePath = requestedPath;
+    } else {
+      // Для маршрутов React возвращаем index.html
+      if (path.extname(pathname)) {
+        res.writeHead(404);
+        return res.end('Not Found');
+      }
+
+      filePath = path.join(DIST_DIR, 'index.html');
+    }
+
+    fs.readFile(filePath, (readError, data) => {
+      if (readError) {
+        console.error('Ошибка чтения файла:', filePath, readError);
+
+        res.writeHead(500);
+        return res.end('Ошибка загрузки игры');
+      }
+
+      const contentType =
+        MIME_TYPES[path.extname(filePath).toLowerCase()] ||
+        'application/octet-stream';
+
+      res.writeHead(200, {
+        'Content-Type': contentType
+      });
+
+      if (req.method === 'HEAD') {
+        return res.end();
+      }
+
+      res.end(data);
+    });
+  });
+});
 
 const io = new Server(httpServer, {
   cors: {
@@ -14,8 +107,6 @@ const io = new Server(httpServer, {
 });
 
 const rooms = {};
-const MAX_PLAYERS = 7;
-const HISTORY_FILE = path.join(__dirname, 'question-history.json');
 
 let questionHistory = {};
 
@@ -154,7 +245,10 @@ io.on('connection', socket => {
     sendRoom(code);
 
     if (typeof callback === 'function') {
-      callback({ success: true, code });
+      callback({
+        success: true,
+        code
+      });
     }
 
     console.log('Создана комната:', code);
@@ -188,7 +282,10 @@ io.on('connection', socket => {
     }
 
     if (room.players.some(player => player.id === socket.id)) {
-      return reply({ success: true, code });
+      return reply({
+        success: true,
+        code
+      });
     }
 
     if (room.players.length >= MAX_PLAYERS) {
@@ -207,7 +304,10 @@ io.on('connection', socket => {
     socket.join(code);
     sendRoom(code);
 
-    reply({ success: true, code });
+    reply({
+      success: true,
+      code
+    });
 
     console.log('Игрок подключился к комнате:', code, playerName);
   });
@@ -603,8 +703,7 @@ io.on('connection', socket => {
   });
 });
 
-const PORT = process.env.PORT || 3001;
-
+// Запуск сервера
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`Сервер запущен на порту ${PORT}`);
 });
