@@ -27,7 +27,7 @@ const MIME_TYPES = {
   '.webp': 'image/webp'
 };
 
-// HTTP-сервер раздаёт frontend из dist
+// HTTP-сервер и раздача frontend
 const httpServer = createServer((req, res) => {
   let pathname;
 
@@ -40,7 +40,7 @@ const httpServer = createServer((req, res) => {
     return res.end('Bad Request');
   }
 
-  // Socket.IO обрабатывает собственные запросы
+  // Запросы Socket.IO обрабатывает сам Socket.IO
   if (pathname.startsWith('/socket.io/')) {
     return;
   }
@@ -65,7 +65,7 @@ const httpServer = createServer((req, res) => {
     if (!error && stats.isFile()) {
       filePath = requestedPath;
     } else {
-      // Для маршрутов React возвращаем index.html
+      // Если файл не найден, проверяем, является ли это маршрутом React
       if (path.extname(pathname)) {
         res.writeHead(404);
         return res.end('Not Found');
@@ -99,6 +99,7 @@ const httpServer = createServer((req, res) => {
   });
 });
 
+// Socket.IO
 const io = new Server(httpServer, {
   cors: {
     origin: '*',
@@ -110,6 +111,7 @@ const rooms = {};
 
 let questionHistory = {};
 
+// Загрузка истории вопросов
 try {
   if (fs.existsSync(HISTORY_FILE)) {
     questionHistory = JSON.parse(
@@ -120,6 +122,7 @@ try {
   console.error('Ошибка загрузки истории вопросов:', error);
 }
 
+// Сохранение истории
 function saveHistory() {
   try {
     fs.writeFileSync(
@@ -149,6 +152,7 @@ function clearQuestionTimer(room) {
   }
 }
 
+// Отправка обновлений комнаты
 function sendRoom(code) {
   const room = rooms[code];
   if (!room) return;
@@ -181,6 +185,7 @@ function sendRoom(code) {
   });
 }
 
+// Генерация кода комнаты
 function generateRoomCode() {
   let code;
 
@@ -197,6 +202,7 @@ function isHost(socket, room) {
   return room && room.hostId === socket.id;
 }
 
+// Подключение игроков
 io.on('connection', socket => {
   console.log('Подключился:', socket.id);
 
@@ -254,7 +260,7 @@ io.on('connection', socket => {
     console.log('Создана комната:', code);
   });
 
-  // Подключение игрока
+  // Подключение игрока по коду
   socket.on('join-room', ({ code, name }, callback) => {
     code = String(code || '').trim();
 
@@ -288,6 +294,7 @@ io.on('connection', socket => {
       });
     }
 
+    // Максимум 7 человек вместе с ведущим
     if (room.players.length >= MAX_PLAYERS) {
       return reply({
         success: false,
