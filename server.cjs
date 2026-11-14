@@ -4,72 +4,7 @@ const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
 
-// Раздача сайта из папки dist
-const DIST_DIR = path.join(__dirname, 'dist');
-
-const MIME_TYPES = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.ico': 'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.webp': 'image/webp'
-};
-
-const httpServer = createServer((req, res) => {
-  // Запросы Socket.IO обрабатывает сам Socket.IO
-  if (req.url?.startsWith('/socket.io/')) return;
-
-  let pathname;
-
-  try {
-    pathname = decodeURIComponent(
-      new URL(req.url, 'http://localhost').pathname
-    );
-  } catch {
-    res.writeHead(400);
-    res.end('Bad Request');
-    return;
-  }
-
-  const requestedFile = path.resolve(DIST_DIR, '.' + pathname);
-
-  if (
-    requestedFile !== DIST_DIR &&
-    !requestedFile.startsWith(DIST_DIR + path.sep)
-  ) {
-    res.writeHead(403);
-    res.end('Forbidden');
-    return;
-  }
-
-  fs.stat(requestedFile, (error, stats) => {
-    const filePath = !error && stats.isFile()
-      ? requestedFile
-      : path.join(DIST_DIR, 'index.html');
-
-    fs.readFile(filePath, (readError, content) => {
-      if (readError) {
-        res.writeHead(500);
-        res.end('Файлы сайта не найдены. Проверьте сборку.');
-        return;
-      }
-
-      res.writeHead(200, {
-        'Content-Type':
-          MIME_TYPES[path.extname(filePath)] || 'application/octet-stream'
-      });
-
-      res.end(content);
-    });
-  });
-});
+const httpServer = createServer();
 
 const io = new Server(httpServer, {
   cors: {
@@ -79,6 +14,7 @@ const io = new Server(httpServer, {
 });
 
 const rooms = {};
+const MAX_PLAYERS = 7;
 const HISTORY_FILE = path.join(__dirname, 'question-history.json');
 
 let questionHistory = {};
@@ -148,7 +84,8 @@ function sendRoom(code) {
       previousGameQuestions: room.previousGameQuestions,
       usedCells: room.usedCells,
       timerSeconds: room.timerSeconds,
-      serverNow: Date.now()
+      serverNow: Date.now(),
+      maxPlayers: MAX_PLAYERS
     });
   });
 }
@@ -174,6 +111,18 @@ io.on('connection', socket => {
 
   // Создание комнаты
   socket.on('create-room', (name, callback) => {
+    const playerName = String(name || '').trim();
+
+    if (!playerName) {
+      if (typeof callback === 'function') {
+        callback({
+          success: false,
+          error: 'Введите имя'
+        });
+      }
+      return;
+    }
+
     const code = generateRoomCode();
     const savedHistory = questionHistory[code] || {};
 
@@ -184,7 +133,7 @@ io.on('connection', socket => {
 
       players: [{
         id: socket.id,
-        name: String(name || '').trim(),
+        name: playerName,
         score: 0
       }],
 
@@ -218,31 +167,35 @@ io.on('connection', socket => {
     const room = rooms[code];
     const playerName = String(name || '').trim();
 
-    if (!room) {
+    const reply = result => {
       if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Комната не найдена'
-        });
+        callback(result);
       }
-      return;
+    };
+
+    if (!room) {
+      return reply({
+        success: false,
+        error: 'Комната не найдена'
+      });
     }
 
     if (!playerName) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Введите имя'
-        });
-      }
-      return;
+      return reply({
+        success: false,
+        error: 'Введите имя'
+      });
     }
 
     if (room.players.some(player => player.id === socket.id)) {
-      if (typeof callback === 'function') {
-        callback({ success: true, code });
-      }
-      return;
+      return reply({ success: true, code });
+    }
+
+    if (room.players.length >= MAX_PLAYERS) {
+      return reply({
+        success: false,
+        error: 'Комната заполнена. Максимум 6 участников и 1 ведущий.'
+      });
     }
 
     room.players.push({
@@ -254,9 +207,7 @@ io.on('connection', socket => {
     socket.join(code);
     sendRoom(code);
 
-    if (typeof callback === 'function') {
-      callback({ success: true, code });
-    }
+    reply({ success: true, code });
 
     console.log('Игрок подключился к комнате:', code, playerName);
   });
