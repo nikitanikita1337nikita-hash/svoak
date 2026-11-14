@@ -19,6 +19,7 @@ const categories = [
 ];
 
 const points = [100, 200, 300, 400, 500];
+const MAX_PLAYERS = 7;
 
 type Question = {
   question: string;
@@ -424,9 +425,7 @@ const socket = io(
   import.meta.env.PROD
     ? window.location.origin
     : `http://${window.location.hostname}:3001`,
-  {
-    autoConnect: false
-  }
+  { autoConnect: false }
 );
 
 export default function App() {
@@ -1050,7 +1049,7 @@ export default function App() {
                 <div>
                   <div className="panel-kicker">ПОДКЛЮЧИЛИСЬ</div>
                   <h2>
-                    Игроки <span>{room.players.length}/4</span>
+                    Игроки <span>{room.players.length}/{MAX_PLAYERS}</span>
                   </h2>
                 </div>
 
