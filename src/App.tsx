@@ -564,6 +564,27 @@ export default function App() {
     });
   };
 
+  const leaveRoom = () => {
+    if (!room) return;
+
+    const message = isHost
+      ? 'Выйти из комнаты? Ведущим станет другой участник. Если вы единственный в комнате, она закроется.'
+      : 'Выйти из этой комнаты и вернуться на главный экран?';
+
+    if (!window.confirm(message)) return;
+
+    const currentCode = room.code;
+    localStorage.removeItem(SESSION_KEY);
+    setRoom(null);
+    setCode('');
+    setError('');
+    socket.emit('leave-room', { code: currentCode }, (result: any) => {
+      if (!result?.success) {
+        setError(result?.error || 'Не удалось выйти из комнаты.');
+      }
+    });
+  };
+
   const createRoom = () => {
     setError('');
 
@@ -883,9 +904,19 @@ export default function App() {
           </div>
         </div>
 
-        <div className={`connection ${connected ? 'online' : ''}`}>
-          <span className="status-dot" />
-          {connected ? 'На связи' : 'Нет соединения'}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div className={`connection ${connected ? 'online' : ''}`}>
+            <span className="status-dot" />
+            {connected ? 'На связи' : 'Нет соединения'}
+          </div>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={leaveRoom}
+            style={{ padding: '9px 13px', whiteSpace: 'nowrap' }}
+          >
+            ← В меню
+          </button>
         </div>
       </header>
 
