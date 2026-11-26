@@ -1,4 +1,3 @@
-
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 const fs = require('fs');
@@ -6,11 +5,11 @@ const path = require('path');
 
 const PORT = process.env.PORT || 3001;
 const MAX_PLAYERS = 7;
+const RECONNECT_GRACE_MS = 5 * 60 * 1000;
 
 const DIST_DIR = path.join(__dirname, 'dist');
 const HISTORY_FILE = path.join(__dirname, 'question-history.json');
 
-// MIME-типы файлов
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'application/javascript',
@@ -27,30 +26,20 @@ const MIME_TYPES = {
   '.webp': 'image/webp'
 };
 
-// HTTP-сервер и раздача frontend
 const httpServer = createServer((req, res) => {
   let pathname;
 
   try {
-    pathname = decodeURIComponent(
-      new URL(req.url, 'http://localhost').pathname
-    );
+    pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
   } catch {
     res.writeHead(400);
     return res.end('Bad Request');
   }
 
-  // Запросы Socket.IO обрабатывает сам Socket.IO
-  if (pathname.startsWith('/socket.io/')) {
-    return;
-  }
+  if (pathname.startsWith('/socket.io/')) return;
 
-  const requestedPath = path.resolve(
-    DIST_DIR,
-    '.' + pathname
-  );
+  const requestedPath = path.resolve(DIST_DIR, '.' + pathname);
 
-  // Защита от выхода за пределы dist
   if (
     requestedPath !== DIST_DIR &&
     !requestedPath.startsWith(DIST_DIR + path.sep)
@@ -65,19 +54,16 @@ const httpServer = createServer((req, res) => {
     if (!error && stats.isFile()) {
       filePath = requestedPath;
     } else {
-      // Если файл не найден, проверяем, является ли это маршрутом React
       if (path.extname(pathname)) {
         res.writeHead(404);
         return res.end('Not Found');
       }
-
       filePath = path.join(DIST_DIR, 'index.html');
     }
 
     fs.readFile(filePath, (readError, data) => {
       if (readError) {
         console.error('Ошибка чтения файла:', filePath, readError);
-
         res.writeHead(500);
         return res.end('Ошибка загрузки игры');
       }
@@ -86,20 +72,14 @@ const httpServer = createServer((req, res) => {
         MIME_TYPES[path.extname(filePath).toLowerCase()] ||
         'application/octet-stream';
 
-      res.writeHead(200, {
-        'Content-Type': contentType
-      });
+      res.writeHead(200, { 'Content-Type': contentType });
 
-      if (req.method === 'HEAD') {
-        return res.end();
-      }
-
+      if (req.method === 'HEAD') return res.end();
       res.end(data);
     });
   });
 });
 
-// Socket.IO
 const io = new Server(httpServer, {
   cors: {
     origin: '*',
@@ -108,28 +88,19 @@ const io = new Server(httpServer, {
 });
 
 const rooms = {};
-
 let questionHistory = {};
 
-// Загрузка истории вопросов
 try {
   if (fs.existsSync(HISTORY_FILE)) {
-    questionHistory = JSON.parse(
-      fs.readFileSync(HISTORY_FILE, 'utf8')
-    );
+    questionHistory = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
   }
 } catch (error) {
   console.error('Ошибка загрузки истории вопросов:', error);
 }
 
-// Сохранение истории
 function saveHistory() {
   try {
-    fs.writeFileSync(
-      HISTORY_FILE,
-      JSON.stringify(questionHistory, null, 2),
-      'utf8'
-    );
+    fs.writeFileSync(HISTORY_FILE, JSON.stringify(questionHistory, null, 2), 'utf8');
   } catch (error) {
     console.error('Ошибка сохранения истории:', error);
   }
@@ -141,7 +112,6 @@ function saveRoomHistory(room) {
     previousGameQuestions: room.previousGameQuestions,
     usedCells: room.usedCells
   };
-
   saveHistory();
 }
 
@@ -152,25 +122,44 @@ function clearQuestionTimer(room) {
   }
 }
 
-// Отправка обновлений комнаты
+function clearPlayerDisconnectTimer(player) {
+  if (player.disconnectTimer) {
+    clearTimeout(player.disconnectTimer);
+    player.disconnectTimer = null;
+  }
+}
+
+// Отправляем клиентам только публичные данные игроков, без socket.id и таймеров.
+function getPublicPlayers(room) {
+  return room.players.map(({ id, name, score, connected }) => ({
+    id,
+    name,
+    score,
+    connected: connected !== false
+  }));
+}
+
 function sendRoom(code) {
   const room = rooms[code];
   if (!room) return;
 
+  const publicPlayers = getPublicPlayers(room);
+
   room.players.forEach(player => {
+    if (!player.socketId || !player.connected) return;
+
     let activeQuestion = null;
 
     if (room.activeQuestion) {
       const { answer, ...publicQuestion } = room.activeQuestion;
-
       activeQuestion = player.id === room.hostId
         ? { ...publicQuestion, answer }
         : publicQuestion;
     }
 
-    io.to(player.id).emit('room-updated', {
+    io.to(player.socketId).emit('room-updated', {
       code: room.code,
-      players: room.players,
+      players: publicPlayers,
       hostId: room.hostId,
       phase: room.phase,
       categories: room.categories,
@@ -185,39 +174,76 @@ function sendRoom(code) {
   });
 }
 
-// Генерация кода комнаты
 function generateRoomCode() {
   let code;
-
   do {
-    code = String(
-      Math.floor(100000 + Math.random() * 900000)
-    );
+    code = String(Math.floor(100000 + Math.random() * 900000));
   } while (rooms[code]);
-
   return code;
 }
 
-function isHost(socket, room) {
-  return room && room.hostId === socket.id;
+function getPlayerById(room, playerId) {
+  return room?.players.find(player => player.id === playerId);
 }
 
-// Подключение игроков
+function isHost(socket, room) {
+  return !!room && !!socket.data.playerId && room.hostId === socket.data.playerId;
+}
+
+function reply(callback, result) {
+  if (typeof callback === 'function') callback(result);
+}
+
+function removePlayer(room, player) {
+  clearPlayerDisconnectTimer(player);
+  room.players = room.players.filter(item => item.id !== player.id);
+
+  if (room.players.length === 0) {
+    clearQuestionTimer(room);
+    delete rooms[room.code];
+    return;
+  }
+
+  if (room.hostId === player.id) {
+    const nextHost = room.players.find(item => item.connected) || room.players[0];
+    room.hostId = nextHost.id;
+    console.log(`Ведущий комнаты ${room.code} сменился на ${nextHost.name}`);
+  }
+
+  sendRoom(room.code);
+}
+
+function schedulePlayerRemoval(room, player) {
+  clearPlayerDisconnectTimer(player);
+
+  player.disconnectTimer = setTimeout(() => {
+    const currentRoom = rooms[room.code];
+    if (!currentRoom) return;
+
+    const currentPlayer = getPlayerById(currentRoom, player.id);
+    if (!currentPlayer || currentPlayer.connected) return;
+
+    console.log(`Время переподключения истекло: ${player.name}, комната ${room.code}`);
+    removePlayer(currentRoom, currentPlayer);
+  }, RECONNECT_GRACE_MS);
+}
+
 io.on('connection', socket => {
   console.log('Подключился:', socket.id);
 
-  // Создание комнаты
-  socket.on('create-room', (name, callback) => {
+  // Создание комнаты. Принимаем как новый объект, так и старый формат строки.
+  socket.on('create-room', (payload, callback) => {
+    const name = typeof payload === 'string' ? payload : payload?.name;
+    const suppliedPlayerId = typeof payload === 'object' ? payload?.playerId : null;
     const playerName = String(name || '').trim();
+    const playerId = String(suppliedPlayerId || socket.id).trim();
 
     if (!playerName) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Введите имя'
-        });
-      }
-      return;
+      return reply(callback, { success: false, error: 'Введите имя' });
+    }
+
+    if (!playerId || playerId.length > 128) {
+      return reply(callback, { success: false, error: 'Некорректный ID игрока' });
     }
 
     const code = generateRoomCode();
@@ -225,112 +251,132 @@ io.on('connection', socket => {
 
     const room = {
       code,
-      hostId: socket.id,
+      hostId: playerId,
       phase: 'lobby',
-
       players: [{
-        id: socket.id,
+        id: playerId,
+        socketId: socket.id,
         name: playerName,
-        score: 0
+        score: 0,
+        connected: true,
+        disconnectTimer: null
       }],
-
       categories: [],
       activeQuestion: null,
-
       usedQuestions: savedHistory.usedQuestions || [],
       previousGameQuestions: savedHistory.previousGameQuestions || [],
       usedCells: savedHistory.usedCells || [],
-
       timerSeconds: 60,
       timerHandle: null
     };
 
     rooms[code] = room;
-
+    socket.data.playerId = playerId;
     socket.join(code);
     sendRoom(code);
 
-    if (typeof callback === 'function') {
-      callback({
-        success: true,
-        code
-      });
-    }
-
+    reply(callback, { success: true, code, playerId });
     console.log('Создана комната:', code);
   });
 
-  // Подключение игрока по коду
-  socket.on('join-room', ({ code, name }, callback) => {
+  // Подключение нового игрока.
+  socket.on('join-room', ({ code, name, playerId: suppliedPlayerId } = {}, callback) => {
     code = String(code || '').trim();
-
     const room = rooms[code];
     const playerName = String(name || '').trim();
-
-    const reply = result => {
-      if (typeof callback === 'function') {
-        callback(result);
-      }
-    };
+    const playerId = String(suppliedPlayerId || socket.id).trim();
 
     if (!room) {
-      return reply({
-        success: false,
-        error: 'Комната не найдена'
-      });
+      return reply(callback, { success: false, error: 'Комната не найдена' });
     }
 
     if (!playerName) {
-      return reply({
-        success: false,
-        error: 'Введите имя'
-      });
+      return reply(callback, { success: false, error: 'Введите имя' });
     }
 
-    if (room.players.some(player => player.id === socket.id)) {
-      return reply({
-        success: true,
-        code
-      });
+    if (!playerId || playerId.length > 128) {
+      return reply(callback, { success: false, error: 'Некорректный ID игрока' });
     }
 
-    // Максимум 7 человек вместе с ведущим
+    const existingPlayer = getPlayerById(room, playerId);
+
+    // Повторный вход с тем же постоянным ID восстанавливает прежнего игрока.
+    if (existingPlayer) {
+      clearPlayerDisconnectTimer(existingPlayer);
+      existingPlayer.socketId = socket.id;
+      existingPlayer.connected = true;
+      existingPlayer.name = playerName;
+      socket.data.playerId = playerId;
+      socket.join(code);
+      sendRoom(code);
+      return reply(callback, { success: true, code, playerId, resumed: true });
+    }
+
     if (room.players.length >= MAX_PLAYERS) {
-      return reply({
+      return reply(callback, {
         success: false,
         error: 'Комната заполнена. Максимум 6 участников и 1 ведущий.'
       });
     }
 
     room.players.push({
-      id: socket.id,
+      id: playerId,
+      socketId: socket.id,
       name: playerName,
-      score: 0
+      score: 0,
+      connected: true,
+      disconnectTimer: null
     });
 
+    socket.data.playerId = playerId;
     socket.join(code);
     sendRoom(code);
 
-    reply({
-      success: true,
-      code
-    });
-
+    reply(callback, { success: true, code, playerId });
     console.log('Игрок подключился к комнате:', code, playerName);
   });
 
-  // Выбор категорий
+  // Восстановление существующего игрока после перезагрузки/возврата во вкладку.
+  socket.on('resume-room', ({ code, playerId } = {}, callback) => {
+    code = String(code || '').trim();
+    playerId = String(playerId || '').trim();
+
+    const room = rooms[code];
+    if (!room) {
+      return reply(callback, {
+        success: false,
+        error: 'Комната уже закрыта или сервер перезапускался. Создай новую комнату.'
+      });
+    }
+
+    const player = getPlayerById(room, playerId);
+    if (!player) {
+      return reply(callback, {
+        success: false,
+        error: 'Игрок больше не числится в этой комнате. Войди заново по коду.'
+      });
+    }
+
+    clearPlayerDisconnectTimer(player);
+    player.socketId = socket.id;
+    player.connected = true;
+
+    socket.data.playerId = playerId;
+    socket.join(code);
+
+    sendRoom(code);
+    reply(callback, { success: true, code, playerId });
+    console.log('Игрок восстановил подключение:', player.name, code);
+  });
+
   socket.on('set-categories', ({ code, categories }, callback) => {
     const room = rooms[code];
 
     if (!isHost(socket, room) || room.phase !== 'lobby') {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Выбирать категории может только ведущий в лобби'
-        });
-      }
-      return;
+      return reply(callback, {
+        success: false,
+        error: 'Выбирать категории может только ведущий в лобби'
+      });
     }
 
     if (
@@ -338,38 +384,25 @@ io.on('connection', socket => {
       categories.length > 6 ||
       new Set(categories).size !== categories.length
     ) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Можно выбрать не более 6 разных категорий'
-        });
-      }
-      return;
+      return reply(callback, {
+        success: false,
+        error: 'Можно выбрать не более 6 разных категорий'
+      });
     }
 
     room.categories = [...categories];
-
     sendRoom(code);
-
-    if (typeof callback === 'function') {
-      callback({ success: true });
-    }
+    reply(callback, { success: true });
   });
 
-  // Запуск игры
   socket.on('start-game', (payload = {}, callback) => {
     const code = String(payload.code || '');
     const room = rooms[code];
 
-    const reply = result => {
-      if (typeof callback === 'function') {
-        callback(result);
-      }
-    };
-
     console.log('[START-GAME] Запрос:', {
       code,
       socketId: socket.id,
+      playerId: socket.data.playerId,
       roomFound: !!room,
       hostId: room?.hostId,
       phase: room?.phase,
@@ -377,79 +410,55 @@ io.on('connection', socket => {
     });
 
     if (!room) {
-      return reply({
-        success: false,
-        error: 'Комната не найдена'
-      });
+      return reply(callback, { success: false, error: 'Комната не найдена' });
     }
 
-    if (room.hostId !== socket.id) {
-      return reply({
+    if (!isHost(socket, room)) {
+      return reply(callback, {
         success: false,
         error: 'Ты не являешься ведущим этой комнаты'
       });
     }
 
     if (room.phase !== 'lobby') {
-      return reply({
-        success: false,
-        error: 'Игра уже запущена'
-      });
+      return reply(callback, { success: false, error: 'Игра уже запущена' });
     }
 
-    if (
-      !Array.isArray(room.categories) ||
-      room.categories.length !== 6
-    ) {
-      return reply({
+    if (!Array.isArray(room.categories) || room.categories.length !== 6) {
+      return reply(callback, {
         success: false,
         error: 'Необходимо выбрать ровно 6 категорий'
       });
     }
 
     room.phase = 'game';
-
     sendRoom(code);
-
     console.log('[START-GAME] Игра запущена:', code);
-
-    reply({ success: true });
+    reply(callback, { success: true });
   });
 
-  // Настройка таймера
   socket.on('set-timer', ({ code, seconds }, callback) => {
     const room = rooms[code];
 
     if (!isHost(socket, room) || room.phase !== 'lobby') {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Настраивать таймер может только ведущий в лобби'
-        });
-      }
-      return;
+      return reply(callback, {
+        success: false,
+        error: 'Настраивать таймер может только ведущий в лобби'
+      });
     }
 
     if (![null, 60, 90].includes(seconds)) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Недопустимое время таймера'
-        });
-      }
-      return;
+      return reply(callback, {
+        success: false,
+        error: 'Недопустимое время таймера'
+      });
     }
 
     room.timerSeconds = seconds;
-
     sendRoom(code);
-
-    if (typeof callback === 'function') {
-      callback({ success: true });
-    }
+    reply(callback, { success: true });
   });
 
-  // Открытие вопроса
   socket.on('open-question', (
     { code, category, points, question, answer },
     callback
@@ -457,23 +466,17 @@ io.on('connection', socket => {
     const room = rooms[code];
 
     if (!isHost(socket, room) || room.phase !== 'game') {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Открывать вопросы может только ведущий во время игры'
-        });
-      }
-      return;
+      return reply(callback, {
+        success: false,
+        error: 'Открывать вопросы может только ведущий во время игры'
+      });
     }
 
     if (room.activeQuestion) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Сначала закройте текущий вопрос'
-        });
-      }
-      return;
+      return reply(callback, {
+        success: false,
+        error: 'Сначала закройте текущий вопрос'
+      });
     }
 
     if (
@@ -482,29 +485,21 @@ io.on('connection', socket => {
       typeof question !== 'string' ||
       typeof answer !== 'string'
     ) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Некорректные данные вопроса'
-        });
-      }
-      return;
+      return reply(callback, {
+        success: false,
+        error: 'Некорректные данные вопроса'
+      });
     }
 
     const cellId = `${category}|${points}`;
-
     if (room.usedCells.includes(cellId)) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Этот вопрос уже использован'
-        });
-      }
-      return;
+      return reply(callback, {
+        success: false,
+        error: 'Этот вопрос уже использован'
+      });
     }
 
     clearQuestionTimer(room);
-
     room.usedCells.push(cellId);
 
     if (!room.usedQuestions.includes(question)) {
@@ -530,107 +525,66 @@ io.on('connection', socket => {
     if (room.timerSeconds !== null) {
       room.timerHandle = setTimeout(() => {
         if (!rooms[code] || !room.activeQuestion) return;
-
         room.activeQuestion.expired = true;
         room.timerHandle = null;
-
         sendRoom(code);
       }, room.timerSeconds * 1000);
     }
 
     sendRoom(code);
-
-    if (typeof callback === 'function') {
-      callback({ success: true });
-    }
+    reply(callback, { success: true });
   });
 
-  // Показать правильный ответ
   socket.on('reveal-answer', ({ code }, callback) => {
     const room = rooms[code];
 
     if (!isHost(socket, room) || !room.activeQuestion) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Невозможно показать ответ'
-        });
-      }
-      return;
+      return reply(callback, {
+        success: false,
+        error: 'Невозможно показать ответ'
+      });
     }
 
     room.activeQuestion.revealed = true;
-
     clearQuestionTimer(room);
     sendRoom(code);
-
-    if (typeof callback === 'function') {
-      callback({ success: true });
-    }
+    reply(callback, { success: true });
   });
 
-  // Начисление очков
   socket.on('award-points', ({ code, playerId }, callback) => {
     const room = rooms[code];
 
     if (!isHost(socket, room)) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Только ведущий может начислять очки'
-        });
-      }
-      return;
+      return reply(callback, {
+        success: false,
+        error: 'Только ведущий может начислять очки'
+      });
     }
 
     if (!room.activeQuestion) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Нет открытого вопроса'
-        });
-      }
-      return;
+      return reply(callback, { success: false, error: 'Нет открытого вопроса' });
     }
 
-    const player = room.players.find(
-      player => player.id === playerId
-    );
-
+    const player = room.players.find(player => player.id === playerId);
     if (!player) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Игрок не найден'
-        });
-      }
-      return;
+      return reply(callback, { success: false, error: 'Игрок не найден' });
     }
 
     player.score += room.activeQuestion.points;
-
     clearQuestionTimer(room);
     room.activeQuestion = null;
-
     sendRoom(code);
-
-    if (typeof callback === 'function') {
-      callback({ success: true });
-    }
+    reply(callback, { success: true });
   });
 
-  // Закрытие вопроса без начисления очков
   socket.on('finish-question', ({ code }, callback) => {
     const room = rooms[code];
 
     if (!isHost(socket, room)) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Только ведущий может закрывать вопросы'
-        });
-      }
-      return;
+      return reply(callback, {
+        success: false,
+        error: 'Только ведущий может закрывать вопросы'
+      });
     }
 
     if (room.activeQuestion) {
@@ -639,24 +593,17 @@ io.on('connection', socket => {
     }
 
     sendRoom(code);
-
-    if (typeof callback === 'function') {
-      callback({ success: true });
-    }
+    reply(callback, { success: true });
   });
 
-  // Новая игра
   socket.on('new-game', ({ code }, callback) => {
     const room = rooms[code];
 
     if (!isHost(socket, room)) {
-      if (typeof callback === 'function') {
-        callback({
-          success: false,
-          error: 'Только ведущий может начать новую игру'
-        });
-      }
-      return;
+      return reply(callback, {
+        success: false,
+        error: 'Только ведущий может начать новую игру'
+      });
     }
 
     clearQuestionTimer(room);
@@ -674,43 +621,37 @@ io.on('connection', socket => {
 
     saveRoomHistory(room);
     sendRoom(code);
-
-    if (typeof callback === 'function') {
-      callback({ success: true });
-    }
+    reply(callback, { success: true });
   });
 
-  // Отключение игрока
   socket.on('disconnect', () => {
     console.log('Отключился:', socket.id);
 
+    const playerId = socket.data.playerId;
+    if (!playerId) return;
+
     for (const code in rooms) {
       const room = rooms[code];
+      const player = getPlayerById(room, playerId);
 
-      const playerIndex = room.players.findIndex(
-        player => player.id === socket.id
+      // Игрок мог уже переподключиться с новым socket.id.
+      if (!player || player.socketId !== socket.id) continue;
+
+      player.connected = false;
+      player.socketId = null;
+      schedulePlayerRemoval(room, player);
+
+      console.log(
+        `Игрок временно отключён: ${player.name}, комната ${code}. Ожидание ${RECONNECT_GRACE_MS / 1000} сек.`
       );
 
-      if (playerIndex === -1) continue;
-
-      room.players.splice(playerIndex, 1);
-
-      if (room.players.length === 0) {
-        clearQuestionTimer(room);
-        delete rooms[code];
-        continue;
-      }
-
-      if (room.hostId === socket.id) {
-        room.hostId = room.players[0].id;
-      }
-
       sendRoom(code);
+      break;
     }
   });
 });
 
-// Запуск сервера
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`Сервер запущен на порту ${PORT}`);
+  console.log(`Ожидание переподключения игрока: ${RECONNECT_GRACE_MS / 1000} секунд`);
 });
