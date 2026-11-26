@@ -394,6 +394,7 @@ type Player = {
   id: string;
   name: string;
   score: number;
+  connected?: boolean;
 };
 
 type ActiveQuestion = {
@@ -421,6 +422,39 @@ type Room = {
   clockOffset?: number;
 };
 
+const SESSION_KEY = 'svoyak-player-session';
+
+type SavedSession = { playerId: string; code: string; name: string };
+
+function getStablePlayerId(): string {
+  let id = localStorage.getItem('svoyak-player-id');
+  if (!id) {
+    id = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `player-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    localStorage.setItem('svoyak-player-id', id);
+  }
+  return id;
+}
+
+function savePlayerSession(session: SavedSession) {
+  localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+}
+
+function readPlayerSession(): SavedSession | null {
+  try {
+    const value = localStorage.getItem(SESSION_KEY);
+    if (!value) return null;
+    const session = JSON.parse(value);
+    if (
+      typeof session.playerId === 'string' &&
+      typeof session.code === 'string' &&
+      typeof session.name === 'string'
+    ) return session;
+  } catch {}
+  return null;
+}
+
 const socket = io(
   import.meta.env.PROD
     ? window.location.origin
@@ -430,9 +464,10 @@ const socket = io(
 
 export default function App() {
   const [connected, setConnected] = useState(false);
+  const [playerId] = useState(getStablePlayerId);
   const [socketId, setSocketId] = useState<string | null>(null);
-  const [name, setName] = useState('');
-  const [code, setCode] = useState('');
+  const [name, setName] = useState(() => readPlayerSession()?.name || '');
+  const [code, setCode] = useState(() => readPlayerSession()?.code || '');
   const [room, setRoom] = useState<Room | null>(null);
   const [error, setError] = useState('');
   const [now, setNow] = useState(Date.now());
@@ -442,7 +477,24 @@ export default function App() {
   useEffect(() => {
     const handleConnect = () => {
       setConnected(true);
-      setSocketId(socket.id || null);
+      setSocketId(playerId);
+
+      const savedSession = readPlayerSession();
+      if (savedSession) {
+        socket.emit('resume-room', {
+          code: savedSession.code,
+          playerId: savedSession.playerId
+        }, (result: any) => {
+          if (!result?.success) {
+            localStorage.removeItem(SESSION_KEY);
+            setRoom(null);
+            setError(result?.error || 'Не удалось восстановить прежнюю комнату. Создай или выбери комнату заново.');
+          } else {
+            setName(savedSession.name);
+            setCode(savedSession.code);
+          }
+        });
+      }
     };
     const handleDisconnect = () => {
       setConnected(false);
@@ -471,7 +523,7 @@ export default function App() {
       socket.off('room-updated', handleRoomUpdate);
       socket.disconnect();
     };
-  }, []);
+  }, [playerId]);
 
   useEffect(() => {
     if (room?.activeQuestion?.deadlineAt == null) return;
@@ -492,16 +544,25 @@ export default function App() {
   const createRoom = () => {
     setError('');
 
-    socket.emit('create-room', name, (result: any) => {
-      if (!result?.success) setError(result?.error || 'Операция не выполнена.');
+    socket.emit('create-room', { name, playerId }, (result: any) => {
+      if (!result?.success) {
+        setError(result?.error || 'Операция не выполнена.');
+        return;
+      }
+      savePlayerSession({ playerId, code: result.code, name: name.trim() });
+      setCode(result.code);
     });
   };
 
   const joinRoom = () => {
     setError('');
 
-    socket.emit('join-room', { code, name }, (result: any) => {
-      if (!result?.success) setError(result?.error || 'Операция не выполнена.');
+    socket.emit('join-room', { code, name, playerId }, (result: any) => {
+      if (!result?.success) {
+        setError(result?.error || 'Операция не выполнена.');
+        return;
+      }
+      savePlayerSession({ playerId, code: result.code, name: name.trim() });
     });
   };
 
