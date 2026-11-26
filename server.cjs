@@ -272,6 +272,7 @@ io.on('connection', socket => {
 
     rooms[code] = room;
     socket.data.playerId = playerId;
+    socket.data.roomCode = code;
     socket.join(code);
     sendRoom(code);
 
@@ -307,6 +308,7 @@ io.on('connection', socket => {
       existingPlayer.connected = true;
       existingPlayer.name = playerName;
       socket.data.playerId = playerId;
+      socket.data.roomCode = code;
       socket.join(code);
       sendRoom(code);
       return reply(callback, { success: true, code, playerId, resumed: true });
@@ -329,11 +331,46 @@ io.on('connection', socket => {
     });
 
     socket.data.playerId = playerId;
+    socket.data.roomCode = code;
     socket.join(code);
     sendRoom(code);
 
     reply(callback, { success: true, code, playerId });
     console.log('Игрок подключился к комнате:', code, playerName);
+  });
+
+  // Исключение игрока доступно только ведущему.
+  socket.on('kick-player', ({ code, playerId } = {}, callback) => {
+    code = String(code || '').trim();
+    playerId = String(playerId || '').trim();
+    const room = rooms[code];
+
+    if (!room || !isHost(socket, room)) {
+      return reply(callback, { success: false, error: 'Только ведущий может исключать игроков.' });
+    }
+
+    if (!playerId || playerId === room.hostId) {
+      return reply(callback, { success: false, error: 'Нельзя исключить ведущего.' });
+    }
+
+    const target = getPlayerById(room, playerId);
+    if (!target) {
+      return reply(callback, { success: false, error: 'Игрок уже не находится в комнате.' });
+    }
+
+    const targetSocketId = target.socketId;
+    if (targetSocketId) {
+      io.to(targetSocketId).emit('kicked', { code, message: 'Ведущий исключил вас из комнаты.' });
+      const targetSocket = io.sockets.sockets.get(targetSocketId);
+      if (targetSocket) {
+        targetSocket.leave(code);
+        targetSocket.data.roomCode = null;
+      }
+    }
+
+    console.log(`Ведущий исключил игрока ${target.name} из комнаты ${code}`);
+    removePlayer(room, target);
+    reply(callback, { success: true });
   });
 
   // Восстановление существующего игрока после перезагрузки/возврата во вкладку.
@@ -362,6 +399,7 @@ io.on('connection', socket => {
     player.connected = true;
 
     socket.data.playerId = playerId;
+    socket.data.roomCode = code;
     socket.join(code);
 
     sendRoom(code);
