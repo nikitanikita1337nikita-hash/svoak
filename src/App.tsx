@@ -500,6 +500,12 @@ export default function App() {
       setConnected(false);
       setSocketId(null);
     };
+    const handleKicked = (data: { message?: string }) => {
+      localStorage.removeItem(SESSION_KEY);
+      setRoom(null);
+      setCode('');
+      setError(data?.message || 'Вас исключили из комнаты.');
+    };
     const handleRoomUpdate = (data: Room) => {
       const serverTime = Number(data.serverNow);
       setRoom({
@@ -514,6 +520,7 @@ export default function App() {
     socket.on('connect', handleConnect);
     socket.on('disconnect', handleDisconnect);
     socket.on('room-updated', handleRoomUpdate);
+    socket.on('kicked', handleKicked);
     socket.connect();
     if (socket.connected) handleConnect();
 
@@ -521,6 +528,7 @@ export default function App() {
       socket.off('connect', handleConnect);
       socket.off('disconnect', handleDisconnect);
       socket.off('room-updated', handleRoomUpdate);
+      socket.off('kicked', handleKicked);
       socket.disconnect();
     };
   }, [playerId]);
@@ -540,6 +548,21 @@ export default function App() {
   const sortedPlayers = [...(room?.players || [])].sort(
     (a, b) => b.score - a.score
   );
+
+  const kickPlayer = (target: Player) => {
+    if (!room || !isHost || target.id === room.hostId) return;
+    const confirmed = window.confirm(`Исключить игрока «${target.name}» из комнаты?`);
+    if (!confirmed) return;
+
+    socket.emit('kick-player', {
+      code: room.code,
+      playerId: target.id
+    }, (result: any) => {
+      if (!result?.success) {
+        setError(result?.error || 'Не удалось исключить игрока.');
+      }
+    });
+  };
 
   const createRoom = () => {
     setError('');
@@ -1130,10 +1153,33 @@ export default function App() {
                       <span className="player-rank">
                         {String(index + 1).padStart(2, '0')}
                       </span>
-                      <strong>{player.name}</strong>
+                      <strong>
+                        {player.name}
+                        {player.connected === false ? ' (не в сети)' : ''}
+                      </strong>
                       <span className="player-score">
                         {player.score} очков
                       </span>
+                      {isHost && player.id !== room.hostId && (
+                        <button
+                          type="button"
+                          onClick={() => kickPlayer(player)}
+                          title={`Исключить ${player.name}`}
+                          aria-label={`Исключить ${player.name}`}
+                          style={{
+                            marginLeft: 8,
+                            padding: '5px 9px',
+                            border: '1px solid rgba(255, 90, 90, 0.35)',
+                            borderRadius: 8,
+                            background: 'rgba(255, 90, 90, 0.10)',
+                            color: '#ff7777',
+                            cursor: 'pointer',
+                            fontWeight: 700
+                          }}
+                        >
+                          ✕
+                        </button>
+                      )}
                     </div>
                   ))}
                 </div>
