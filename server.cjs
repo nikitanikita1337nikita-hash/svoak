@@ -373,6 +373,29 @@ io.on('connection', socket => {
     reply(callback, { success: true });
   });
 
+  // Добровольный выход из комнаты: игрок удаляется сразу, без ожидания таймера переподключения.
+  socket.on('leave-room', ({ code } = {}, callback) => {
+    code = String(code || socket.data.roomCode || '').trim();
+    const room = rooms[code];
+    const playerId = socket.data.playerId;
+
+    if (!room || !playerId) {
+      socket.data.roomCode = null;
+      return reply(callback, { success: true });
+    }
+
+    const player = getPlayerById(room, playerId);
+    socket.data.roomCode = null;
+    socket.leave(code);
+
+    if (player && player.socketId === socket.id) {
+      console.log(`Игрок ${player.name} добровольно покинул комнату ${code}`);
+      removePlayer(room, player);
+    }
+
+    reply(callback, { success: true });
+  });
+
   // Восстановление существующего игрока после перезагрузки/возврата во вкладку.
   socket.on('resume-room', ({ code, playerId } = {}, callback) => {
     code = String(code || '').trim();
